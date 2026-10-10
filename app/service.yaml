@@ -1,0 +1,18 @@
+# AI Application Metadata Manifest
+# Required by the Central Compliance Layer
+
+service_name: "sql-explainer"
+version: "1.0.0"
+owner_team: "analytics-eng"
+operational_tier: "tier_2_self_service" # Options: tier_1_platform_managed, tier_2_self_service
+contact: "analytics-eng@internal.company"
+
+alerts:
+  slack_channel: "#analytics-alerts"
+  pagerduty_service: "PD-ANALYTICS-TEAM"
+
+model_metadata:
+  provider: "openai"
+  model_name: "gpt-4o-mini"
+  data_classification: "internal_only"
+  autonomous_actions: false
