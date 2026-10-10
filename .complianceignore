@@ -1,0 +1,5 @@
+# Files and directories ignored by the compliance static scanner
+tests/vulnerable_app/
+.venv/
+__pycache__/
+.pytest_cache/
