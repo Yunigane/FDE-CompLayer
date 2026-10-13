@@ -7,6 +7,13 @@ owner_team: "analytics-eng"
 operational_tier: "tier_2_self_service" # Options: tier_1_platform_managed, tier_2_self_service
 contact: "analytics-eng@internal.company"
 
+# Regulatory & Governance Compliance (EU AI Act & OWASP Alignment)
+regulatory_compliance:
+  eu_ai_act_risk_tier: "minimal_risk" # Options: minimal_risk, specific_transparency_risk, high_risk, prohibited_risk
+  transparency_notice: true           # Indicates AI generation disclosure
+  human_oversight: false              # Mandatory for high_risk (EU AI Act Art. 14)
+  autonomous_actions: false           # Mitigation for OWASP LLM06 (Excessive Agency)
+
 alerts:
   slack_channel: "#analytics-alerts"
   pagerduty_service: "PD-ANALYTICS-TEAM"
@@ -15,4 +22,3 @@ model_metadata:
   provider: "openai"
   model_name: "gpt-4o-mini"
   data_classification: "internal_only"
-  autonomous_actions: false

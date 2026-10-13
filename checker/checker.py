@@ -2,22 +2,25 @@
 Universal Compliance Checker CLI.
 Entrypoint for automated validation of internal AI applications.
 Executes static analysis, automated contract discovery, dynamic HTTP testing,
-and adversarial AI safety probing.
+adversarial AI safety probing, and optional LLM-as-a-judge evaluation.
 """
 import sys
 import argparse
 from pathlib import Path
+from typing import List, Tuple, Optional
+import httpx
 
 # Ensure project root is in sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from checker.static_scanner import StaticScanner
+from checker.models import Target, CheckResult, Severity, Status
+from checker.static_scanner import StaticScanner, generate_manifest_template
 from checker.discovery import ServiceDiscovery
 from checker.dynamic_prober import DynamicProber
 from checker.safety_evaluator import SafetyEvaluator
-from checker.reporter import ComplianceReporter
+from checker.reporter import ComplianceReporter, compute_verdict
 
 
 def parse_args():
@@ -40,14 +43,65 @@ def parse_args():
         help="Explicit path to service.yaml (auto-discovered if omitted)"
     )
     parser.add_argument(
+        "--init-manifest",
+        action="store_true",
+        help="Generate a pre-filled service.yaml template in the repository root and exit."
+    )
+    parser.add_argument(
         "--endpoint",
         default=None,
-        help="Explicit endpoint override (e.g. /v1/chat). Discovered automatically via OpenAPI/AST if omitted."
+        help="Explicit endpoint override (e.g. /api/v1/explain-sql). Discovered automatically via OpenAPI/AST if omitted."
+    )
+    parser.add_argument(
+        "--auth-type",
+        default=None,
+        choices=["bearer", "basic", "api_key", "none"],
+        help="Authentication scheme: bearer (default), basic, or api_key."
     )
     parser.add_argument(
         "--auth-token",
         default=None,
-        help="Explicit bearer token for testing authorized routes (discovered automatically from .env if omitted)."
+        help="Credential token for Bearer or API-Key auth."
+    )
+    parser.add_argument(
+        "--basic-user",
+        default=None,
+        help="Username for HTTP Basic auth."
+    )
+    parser.add_argument(
+        "--basic-pass",
+        default=None,
+        help="Password for HTTP Basic auth."
+    )
+    parser.add_argument(
+        "--api-key-header",
+        default=None,
+        help="Header name for API Key auth (default: X-API-Key)."
+    )
+    parser.add_argument(
+        "--payload-field",
+        default=None,
+        help="JSON field name for prompt payload (e.g. query, prompt, message)."
+    )
+    parser.add_argument(
+        "--payload-template",
+        default=None,
+        help="Custom JSON payload template with {{PROMPT}} placeholder."
+    )
+    parser.add_argument(
+        "--canary",
+        default=None,
+        help="Expected canary token string to assert non-disclosure."
+    )
+    parser.add_argument(
+        "--judge",
+        action="store_true",
+        help="Enable advisory LLM-as-a-judge (P1 WARN) using OPENAI_API_KEY."
+    )
+    parser.add_argument(
+        "--judge-api-key",
+        default=None,
+        help="API key for advisory LLM judge."
     )
     parser.add_argument(
         "--json",
@@ -62,65 +116,108 @@ def parse_args():
     return parser.parse_args()
 
 
+def run_compliance_suite(
+    target: Target,
+    client: Optional[httpx.Client] = None,
+    manifest_path: Optional[str] = None,
+    enable_judge: bool = False,
+    judge_api_key: Optional[str] = None,
+) -> List[CheckResult]:
+    """
+    Executes all static, discovery, dynamic, and safety checks against the target.
+    Accepts an optional injected httpx.Client (e.g. starlette.testclient.TestClient).
+    """
+    results: List[CheckResult] = []
+    close_client = False
+    if client is None:
+        client = httpx.Client(base_url=target.url, timeout=10.0)
+        close_client = True
+
+    try:
+        # 1. Static Security, Manifest & AST Capability Scan
+        static_scanner = StaticScanner(target.repo_path, manifest_path)
+        results.extend(static_scanner.run_all())
+
+        # Extract declared canary from manifest if present
+        manifest_file = static_scanner.find_manifest()
+        if manifest_file and not target.canary:
+            try:
+                from ruamel.yaml import YAML
+                y = YAML(typ="safe")
+                with open(manifest_file, "r", encoding="utf-8") as mf:
+                    mdata = y.load(mf)
+                if isinstance(mdata, dict):
+                    target.canary = mdata.get("safety", {}).get("canary")
+            except Exception:
+                pass
+
+        # 2. Dynamic HTTP Probing (Health, Tracing, Auth Gate)
+        dynamic_prober = DynamicProber(target, client=client)
+        results.extend(dynamic_prober.run_all())
+
+        # 3. AI Safety & Red-Teaming Probing
+        safety_evaluator = SafetyEvaluator(
+            target,
+            client=client,
+            enable_judge=enable_judge,
+            judge_api_key=judge_api_key,
+        )
+        results.extend(safety_evaluator.run_all())
+
+    finally:
+        if close_client:
+            client.close()
+
+    return results
+
+
 def main():
     args = parse_args()
     repo_path = Path(args.repo_path).resolve()
 
-    # 1. Static Security & Manifest Scan
-    static_scanner = StaticScanner(str(repo_path), args.manifest)
-    static_results = static_scanner.run_all()
+    # Handle --init-manifest flag
+    if args.init_manifest:
+        target_manifest = repo_path / "service.yaml"
+        if target_manifest.exists():
+            print(f"Error: {target_manifest} already exists.", file=sys.stderr)
+            sys.exit(1)
+        template = generate_manifest_template(service_name=repo_path.name)
+        with open(target_manifest, "w", encoding="utf-8") as f:
+            f.write(template)
+        print(f"Created pre-filled service.yaml at {target_manifest}")
+        sys.exit(0)
 
-    manifest_data = static_results["checks"]["static_manifest"].get("data", {})
-
-    # 2. Automated Service & Contract Discovery
+    # 1. Automated Discovery
     discovery = ServiceDiscovery(args.url, str(repo_path))
-    contract = discovery.discover()
+    try:
+        target = discovery.discover_target(
+            endpoint_override=args.endpoint,
+            auth_type_override=args.auth_type,
+            auth_token_override=args.auth_token,
+            basic_user_override=args.basic_user,
+            basic_pass_override=args.basic_pass,
+            api_key_header_override=args.api_key_header,
+            payload_field_override=args.payload_field,
+            payload_template_override=args.payload_template,
+            canary_override=args.canary,
+        )
+    finally:
+        discovery.close()
 
-    # Apply optional manual overrides if specified
-    if args.endpoint:
-        contract["endpoint"] = args.endpoint
-        contract["source"] = "manual_cli_override"
-    if args.auth_token:
-        contract["token"] = args.auth_token
+    # 2. Execute Compliance Suite
+    results = run_compliance_suite(
+        target,
+        manifest_path=args.manifest,
+        enable_judge=args.judge,
+        judge_api_key=args.judge_api_key,
+    )
 
-    # 3. Dynamic HTTP Probing (Health, Tracing, Auth Gate)
-    dynamic_prober = DynamicProber(args.url, contract)
-    dynamic_results = dynamic_prober.run_all()
-
-    # 4. AI Safety & Red-Teaming Probing
-    safety_evaluator = SafetyEvaluator(args.url, contract)
-    safety_results = safety_evaluator.run_all()
-
-    # Aggregate Results
-    all_results = {
-        "static_secrets": static_results["checks"]["static_secrets"],
-        "static_manifest": static_results["checks"]["static_manifest"],
-        "dynamic_health": dynamic_results["checks"]["dynamic_health"],
-        "dynamic_tracing": dynamic_results["checks"]["dynamic_tracing"],
-        "dynamic_auth": dynamic_results["checks"]["dynamic_auth"],
-        "safety_eval": safety_results,
-    }
-
-    target_info = {
-        "url": args.url,
-        "endpoint": contract["endpoint"],
-        "discovery_source": contract.get("source", "unknown"),
-        "service_name": manifest_data.get("service_name", "Unknown"),
-        "owner_team": manifest_data.get("owner_team", "Unknown"),
-        "operational_tier": manifest_data.get("operational_tier", "Unknown")
-    }
-
-    # 5. Render Compliance Report
-    reporter = ComplianceReporter(target_info, all_results)
+    # 3. Render Report
+    reporter = ComplianceReporter(target, results, strict=args.strict)
     if args.json:
         exit_code = reporter.render_json()
     else:
         exit_code = reporter.render_terminal()
-
-    # Enforce --strict mode if enabled
-    if args.strict and any(c.get("status") == "WARN" for c in all_results.values()):
-        print("\n[STRICT MODE] Warnings detected. Failing build.")
-        exit_code = 1
 
     sys.exit(exit_code)
 

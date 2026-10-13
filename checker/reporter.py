@@ -1,101 +1,153 @@
 """
 Compliance Audit Reporter.
-Renders formatted ANSI color terminal summary tables and emits structured JSON reports.
+Renders formatted terminal summary tables and emits structured JSON reports.
+Enforces consistent verdict semantics across terminal and CI JSON modes:
+- Exit 0: All P0 checks PASS (SAFE TO SHIP)
+- Exit 1: Any P0 check FAIL (DEPLOYMENT BLOCKED)
+- Exit 2: No FAIL, but a P0 check was SKIPPED (INCOMPLETE: NOT SAFE TO SHIP)
+- (--strict flag upgrades any P1 WARN to exit 1)
 """
 import json
 import sys
-from typing import Dict, Any, List
+import os
+from typing import List, Dict, Any, Tuple
 
-# ANSI Color Codes
-GREEN = "\033[92m"
-RED = "\033[91m"
-YELLOW = "\033[93m"
-CYAN = "\033[96m"
-BOLD = "\033[1m"
-RESET = "\033[0m"
+from checker.models import Target, CheckResult, Severity, Status
+
+# ANSI Color Codes (honors NO_COLOR environment variable)
+USE_COLOR = sys.stdout.isatty() and not os.getenv("NO_COLOR")
+
+GREEN = "\033[92m" if USE_COLOR else ""
+RED = "\033[91m" if USE_COLOR else ""
+YELLOW = "\033[93m" if USE_COLOR else ""
+BLUE = "\033[94m" if USE_COLOR else ""
+CYAN = "\033[96m" if USE_COLOR else ""
+BOLD = "\033[1m" if USE_COLOR else ""
+RESET = "\033[0m" if USE_COLOR else ""
+
+
+def compute_verdict(results: List[CheckResult], strict: bool = False) -> Tuple[int, str]:
+    """
+    Computes exit code and human-readable verdict.
+    Shared identically between terminal and JSON reporters.
+    """
+    has_p0_fail = any(r.severity == Severity.P0 and r.status == Status.FAIL for r in results)
+    has_p0_skipped = any(r.severity == Severity.P0 and r.status == Status.SKIPPED for r in results)
+    has_warn = any(r.status == Status.WARN for r in results)
+
+    if has_p0_fail:
+        return 1, "DEPLOYMENT BLOCKED (P0 Violations Detected)"
+    if strict and has_warn:
+        return 1, "DEPLOYMENT BLOCKED (Strict Mode: Warnings Detected)"
+    if has_p0_skipped:
+        return 2, "INCOMPLETE: NOT SAFE TO SHIP (P0 Checks Skipped)"
+    return 0, "SAFE TO SHIP"
 
 
 class ComplianceReporter:
-    def __init__(self, target_info: Dict[str, Any], results: Dict[str, Any]):
-        self.target_info = target_info
+    def __init__(self, target: Target, results: List[CheckResult], strict: bool = False):
+        self.target = target
         self.results = results
+        self.strict = strict
 
     def render_terminal(self) -> int:
         """
-        Prints formatted ANSI report table and returns process exit code (0 or 1).
+        Prints formatted terminal report table and returns exit code.
         """
-        print(f"\n{BOLD}{CYAN}========================================================================{RESET}")
-        print(f"{BOLD}{CYAN}          AI COMPLIANCE LAYER: AUTOMATED AUDIT REPORT                   {RESET}")
-        print(f"{BOLD}{CYAN}========================================================================{RESET}\n")
+        exit_code, verdict = compute_verdict(self.results, self.strict)
 
-        print(f"{BOLD}Target URL:{RESET}     {self.target_info.get('url', 'N/A')}")
-        print(f"{BOLD}Discovered Route:{RESET}{self.target_info.get('endpoint', 'N/A')} [{self.target_info.get('discovery_source', 'N/A')}]")
-        print(f"{BOLD}Service Name:{RESET}   {self.target_info.get('service_name', 'N/A')}")
-        print(f"{BOLD}Owner Team:{RESET}     {self.target_info.get('owner_team', 'N/A')}")
-        print(f"{BOLD}Operational Tier:{RESET}{self.target_info.get('operational_tier', 'N/A')}\n")
+        print(f"\n{BOLD}{CYAN}=================================================================================={RESET}")
+        print(f"{BOLD}{CYAN}                 AI COMPLIANCE LAYER: AUTOMATED AUDIT REPORT                      {RESET}")
+        print(f"{BOLD}{CYAN}=================================================================================={RESET}\n")
 
-        header_fmt = f"{BOLD}{'PILLAR / CHECK':<30} {'SEVERITY':<10} {'STATUS':<10} {'DETAILS':<35}{RESET}"
-        print(header_fmt)
-        print("-" * 88)
+        print(f"{BOLD}Target URL:{RESET}       {self.target.url}")
+        print(f"{BOLD}Discovered Route:{RESET} {self.target.endpoint or 'None discovered'}")
+        print(f"{BOLD}Auth Scheme:{RESET}      {self.target.auth_type.upper()}")
+        print(f"{BOLD}Service Name:{RESET}     {self.target.service_name or 'N/A'}")
+        if self.target.payload_field:
+            print(f"{BOLD}Payload Field:{RESET}    {self.target.payload_field}")
+        print()
 
-        passed_count = 0
-        failed_count = 0
-        warn_count = 0
+        # Table formatting
+        col_pillar = 38
+        col_sev = 10
+        col_status = 12
+        col_details = 40
 
-        # Ordered list of checks to display
-        check_keys = [
-            ("Static Secrets Scan", "static_secrets"),
-            ("Service Manifest", "static_manifest"),
-            ("Health & Liveness", "dynamic_health"),
-            ("Observability & Tracing", "dynamic_tracing"),
-            ("Access Control & Auth", "dynamic_auth"),
-            ("AI Safety & Guardrails", "safety_eval"),
-        ]
+        header = f"{'PILLAR / COMPLIANCE GATE':<{col_pillar}} {'SEVERITY':<{col_sev}} {'STATUS':<{col_status}} {'DETAILS'}"
+        print(f"{BOLD}{header}{RESET}")
+        print("-" * 82)
 
-        for display_name, key in check_keys:
-            check_data = self.results.get(key)
-            if not check_data:
-                continue
+        counts = {Status.PASS: 0, Status.FAIL: 0, Status.WARN: 0, Status.SKIPPED: 0}
 
-            status = check_data.get("status", "UNKNOWN")
-            severity = check_data.get("severity", "P0")
-            msg = check_data.get("message", "")
+        for r in self.results:
+            counts[r.status] = counts.get(r.status, 0) + 1
 
-            if status == "PASS":
+            if r.status == Status.PASS:
                 status_str = f"{GREEN}{BOLD}PASS{RESET}"
-                passed_count += 1
-            elif status == "FAIL":
+            elif r.status == Status.FAIL:
                 status_str = f"{RED}{BOLD}FAIL{RESET}"
-                failed_count += 1
-            else:
+            elif r.status == Status.WARN:
                 status_str = f"{YELLOW}{BOLD}WARN{RESET}"
-                warn_count += 1
+            else:
+                status_str = f"{BLUE}{BOLD}SKIPPED{RESET}"
 
-            # Format row
-            short_msg = msg[:45] + "..." if len(msg) > 45 else msg
-            print(f"{display_name:<30} {severity:<10} {status_str:<19} {short_msg:<35}")
+            # Pad raw status (without ANSI) to maintain table alignment
+            pad = " " * (col_status - len(r.status.value))
+            short_msg = r.message[:col_details] + ("..." if len(r.message) > col_details else "")
+            print(f"{r.title:<{col_pillar}} {r.severity.value:<{col_sev}} {status_str}{pad} {short_msg}")
 
-            # Print sub-findings if secrets failed
-            if key == "static_secrets" and check_data.get("findings"):
-                for finding in check_data["findings"]:
-                    print(f"  {RED}↳ Leaked in {finding['file']}:{finding['line']} ({finding['description']}){RESET}")
+            if r.status == Status.FAIL and r.evidence:
+                first_evidence = r.evidence.splitlines()[0][:75]
+                print(f"  {RED}↳ Evidence: {first_evidence}{RESET}")
+            if r.status in (Status.FAIL, Status.SKIPPED) and r.hint:
+                print(f"  {CYAN}↳ Hint: {r.hint.splitlines()[0]}{RESET}")
 
-        print("-" * 88)
-        print(f"{BOLD}Summary:{RESET} {GREEN}{passed_count} Passed{RESET} | {RED}{failed_count} Failed{RESET} | {YELLOW}{warn_count} Warnings\n")
+        print("-" * 82)
+        summary_line = (
+            f"{BOLD}Summary:{RESET} "
+            f"{GREEN}{counts[Status.PASS]} Passed{RESET} | "
+            f"{RED}{counts[Status.FAIL]} Failed{RESET} | "
+            f"{YELLOW}{counts[Status.WARN]} Warnings{RESET} | "
+            f"{BLUE}{counts[Status.SKIPPED]} Skipped{RESET}\n"
+        )
+        print(summary_line)
 
-        if failed_count == 0:
-            print(f"{GREEN}{BOLD}>>> COMPLIANCE STATUS: SAFE TO SHIP (Exit Code 0) <<<{RESET}\n")
-            return 0
+        if exit_code == 0:
+            print(f"{GREEN}{BOLD}>>> COMPLIANCE STATUS: {verdict} (Exit Code 0) <<<{RESET}\n")
+        elif exit_code == 2:
+            print(f"{BLUE}{BOLD}>>> COMPLIANCE STATUS: {verdict} (Exit Code 2) <<<{RESET}\n")
         else:
-            print(f"{RED}{BOLD}>>> COMPLIANCE STATUS: DEPLOYMENT BLOCKED (Exit Code 1) <<<{RESET}\n")
-            return 1
+            print(f"{RED}{BOLD}>>> COMPLIANCE STATUS: {verdict} (Exit Code 1) <<<{RESET}\n")
+
+        if self.strict and counts[Status.WARN] > 0 and exit_code == 1:
+            print(f"{YELLOW}[STRICT MODE ENFORCED]: Build failed due to active warnings.{RESET}\n", file=sys.stderr)
+
+        return exit_code
 
     def render_json(self) -> int:
-        """Emits pure JSON output for automated CI/CD pipelines."""
+        """Emits pure JSON output to stdout for CI/CD pipelines."""
+        exit_code, verdict = compute_verdict(self.results, self.strict)
         payload = {
-            "target": self.target_info,
-            "results": self.results,
-            "passed": all(c.get("status") == "PASS" for c in self.results.values() if c.get("severity") == "P0")
+            "target": {
+                "url": self.target.url,
+                "endpoint": self.target.endpoint,
+                "auth_type": self.target.auth_type,
+                "service_name": self.target.service_name,
+            },
+            "verdict": verdict,
+            "exit_code": exit_code,
+            "summary": {
+                "passed": sum(1 for r in self.results if r.status == Status.PASS),
+                "failed": sum(1 for r in self.results if r.status == Status.FAIL),
+                "warn": sum(1 for r in self.results if r.status == Status.WARN),
+                "skipped": sum(1 for r in self.results if r.status == Status.SKIPPED),
+            },
+            "checks": [r.to_dict() for r in self.results],
         }
         print(json.dumps(payload, indent=2))
-        return 0 if payload["passed"] else 1
+
+        if self.strict and any(r.status == Status.WARN for r in self.results):
+            print("[STRICT MODE ENFORCED]: Warnings treated as errors.", file=sys.stderr)
+
+        return exit_code

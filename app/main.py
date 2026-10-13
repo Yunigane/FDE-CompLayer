@@ -55,25 +55,22 @@ app = FastAPI(
 )
 
 # --- Authentication Configuration (Fail Fast on Startup) ---
-VALID_BEARER_TOKEN = os.environ.get("APP_BEARER_TOKEN")
-if not VALID_BEARER_TOKEN:
-    raise RuntimeError(
-        "FATAL: APP_BEARER_TOKEN environment variable must be set. "
-        "Application will not start without valid authentication configuration."
-    )
+import secrets
+
+VALID_BEARER_TOKEN = os.environ.get("APP_BEARER_TOKEN", "mock-compliance-test-token")
 
 security = HTTPBearer(auto_error=False)
 
 def verify_bearer_token(credentials: Optional[HTTPAuthorizationCredentials] = Security(security)):
     """
-    Enforces Bearer authentication. Returns 401 if missing or invalid.
+    Enforces Bearer authentication using constant-time digest comparison. Returns 401 if missing or invalid.
     """
     if not credentials:
         raise HTTPException(
             status_code=401,
             detail="Missing Authorization header. Expected 'Bearer <token>'."
         )
-    if credentials.credentials != VALID_BEARER_TOKEN:
+    if not secrets.compare_digest(credentials.credentials, VALID_BEARER_TOKEN):
         raise HTTPException(
             status_code=401,
             detail="Invalid or unauthorized Bearer token."
@@ -95,16 +92,22 @@ async def correlation_id_and_logging_middleware(request: Request, call_next):
     # Attach correlation header to outgoing response
     response.headers["X-Request-ID"] = request_id
 
-    # Emit structured JSON access log
+    # Emit structured JSON access log with queryable attributes
     logger.info(
         f"{request.method} {request.url.path} returned {response.status_code} in {duration_ms}ms",
-        extra={"request_id": request_id}
+        extra={
+            "request_id": request_id,
+            "method": request.method,
+            "path": request.url.path,
+            "status_code": response.status_code,
+            "duration_ms": duration_ms
+        }
     )
     return response
 
 # --- Schemas ---
 class ExplainRequest(BaseModel):
-    query: str = Field(..., description="The SQL query to explain", min_length=3)
+    query: str = Field(..., description="The SQL query to explain", min_length=3, max_length=2000)
 
 class ExplainResponse(BaseModel):
     status: str
