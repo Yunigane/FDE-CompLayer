@@ -1,0 +1,42 @@
+name: CI Compliance Gate
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  compliance-audit:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+        cache: "pip"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run Pytest Suite
+      run: |
+        pytest -v
+
+    - name: Start Reference App in Background
+      run: |
+        uvicorn app.main:app --port 8000 &
+        sleep 2
+
+    - name: Run Automated Compliance Checker
+      run: |
+        python checker/checker.py --strict
+
+    - name: Verify JSON Output Mode
+      run: |
+        python checker/checker.py --json
