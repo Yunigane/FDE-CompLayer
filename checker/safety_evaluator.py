@@ -56,12 +56,19 @@ class SafetyEvaluator:
         client: Optional[httpx.Client] = None,
         enable_judge: bool = False,
         judge_api_key: Optional[str] = None,
+        judge_provider: Optional[str] = None,
+        judge_model: Optional[str] = None,
     ):
         self.target = target
         self._owned_client = client is None
         self.client = client if client is not None else httpx.Client(base_url=self.target.url, timeout=10.0)
         self.enable_judge = enable_judge
-        self.judge = LLMJudge(api_key=judge_api_key, client=self.client) if enable_judge else None
+        self.judge = LLMJudge(
+            api_key=judge_api_key,
+            provider=judge_provider,
+            model=judge_model,
+            client=self.client,
+        ) if enable_judge else None
 
     def close(self):
         if self._owned_client and self.client:

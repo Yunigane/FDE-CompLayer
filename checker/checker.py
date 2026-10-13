@@ -96,7 +96,18 @@ def parse_args():
     parser.add_argument(
         "--judge",
         action="store_true",
-        help="Enable advisory LLM-as-a-judge (P1 WARN) using OPENAI_API_KEY."
+        help="Enable advisory LLM-as-a-judge (P1 WARN) using configured API key."
+    )
+    parser.add_argument(
+        "--judge-provider",
+        default=None,
+        choices=["openai", "anthropic", "gemini"],
+        help="Model provider for advisory LLM judge (default: auto-detect from env: OpenAI, Anthropic, or Gemini)."
+    )
+    parser.add_argument(
+        "--judge-model",
+        default=None,
+        help="Model identifier for advisory judge (e.g. gpt-4o-mini, claude-3-5-haiku-20241022, gemini-1.5-flash)."
     )
     parser.add_argument(
         "--judge-api-key",
@@ -122,6 +133,8 @@ def run_compliance_suite(
     manifest_path: Optional[str] = None,
     enable_judge: bool = False,
     judge_api_key: Optional[str] = None,
+    judge_provider: Optional[str] = None,
+    judge_model: Optional[str] = None,
 ) -> List[CheckResult]:
     """
     Executes all static, discovery, dynamic, and safety checks against the target.
@@ -161,6 +174,8 @@ def run_compliance_suite(
             client=client,
             enable_judge=enable_judge,
             judge_api_key=judge_api_key,
+            judge_provider=judge_provider,
+            judge_model=judge_model,
         )
         results.extend(safety_evaluator.run_all())
 
@@ -210,6 +225,8 @@ def main():
         manifest_path=args.manifest,
         enable_judge=args.judge,
         judge_api_key=args.judge_api_key,
+        judge_provider=args.judge_provider,
+        judge_model=args.judge_model,
     )
 
     # 3. Render Report
