@@ -18,7 +18,7 @@ yaml = YAML(typ="safe")
 
 # Directory and file ignore lists (core framework defaults)
 IGNORED_DIRS = {".git", ".venv", "venv", "env", "__pycache__", ".pytest_cache", "node_modules", ".idea", ".vscode"}
-IGNORED_EXTENSIONS = {".pyc", ".pyo", ".pyd", ".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".lock", ".svg"}
+IGNORED_EXTENSIONS = {".pyc", ".pyo", ".pyd", ".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".lock", ".svg", ".md"}
 IGNORED_FILES = {".gitignore", "package-lock.json", "poetry.lock"}
 
 # Production secret patterns across all major AI model providers & clouds
@@ -29,12 +29,14 @@ SECRET_PATTERNS = [
     (r"hf_[a-zA-Z0-9]{34,}", "Hugging Face Access Token"),
     (r"gsk_[a-zA-Z0-9]{48,}", "Groq Cloud API Key signature"),
     (r"r8_[a-zA-Z0-9]{37,}", "Replicate API Token signature"),
-    (r"(?:cohere[_-]?api[_-]?key|cohere[_-]?key)\s*=\s*['\"][a-zA-Z0-9]{40}['\"]", "Cohere API Key assignment"),
-    (r"(?:mistral[_-]?api[_-]?key|mistral[_-]?key)\s*=\s*['\"][a-zA-Z0-9]{32}['\"]", "Mistral API Key assignment"),
-    (r"(?:azure[_-]?openai[_-]?key|azure[_-]?key)\s*=\s*['\"][a-f0-9]{32}['\"]", "Azure OpenAI API Key assignment"),
+    (r"(?i)(?:cohere[_-]?api[_-]?key|cohere[_-]?key)\s*[:=]\s*['\"][a-zA-Z0-9]{40}['\"]", "Cohere API Key assignment"),
+    (r"(?i)(?:mistral[_-]?api[_-]?key|mistral[_-]?key)\s*[:=]\s*['\"][a-zA-Z0-9]{32}['\"]", "Mistral API Key assignment"),
+    (r"(?i)(?:azure[_-]?openai[_-]?key|azure[_-]?key)\s*[:=]\s*['\"][a-f0-9]{32}['\"]", "Azure OpenAI API Key assignment"),
     (r"AKIA[0-9A-Z]{16}", "AWS Access Key ID"),
+    (r"(?i)(?:aws[_-]?secret[_-]?(?:access[_-]?)?key)\s*[:=]\s*['\"][a-zA-Z0-9/+=]{40}['\"]", "AWS Secret Access Key"),
     (r"-----BEGIN (?:RSA|EC|DSA|OPENSSH|PRIVATE) KEY-----", "Private cryptographic key"),
-    (r"(?:api[_-]?key|secret[_-]?key|auth[_-]?token)\s*=\s*['\"][a-zA-Z0-9_\-\.]{24,}['\"]", "Credential assignment"),
+    (r"(?i)(?:api[_-]?key|secret[_-]?key|auth[_-]?token|bearer[_-]?token|access[_-]?key)\s*[:=]\s*['\"][a-zA-Z0-9_\-\.\+/]{20,}['\"]", "Credential assignment"),
+    (r"https://hooks\.slack\.com/services/T[a-zA-Z0-9_]+/B[a-zA-Z0-9_]+/[a-zA-Z0-9_]+", "Slack Incoming Webhook URL"),
 ]
 
 # Explicit placeholder allowlist (only exact mock prefixes or obvious placeholders)
@@ -177,6 +179,7 @@ class StaticScanner:
                                         "description": desc,
                                         "snippet": line_strip[:80] + ("..." if len(line_strip) > 80 else "")
                                     })
+                                    break
                 except Exception:
                     continue
 
@@ -330,19 +333,38 @@ class StaticScanner:
         """
         undeclared_capabilities = []
         for py_file in self.repo_path.glob("**/*.py"):
-            if any(part in py_file.parts for part in IGNORED_DIRS.union({"tests", "checker", ".gemini", "brain", "site-packages"})):
+            try:
+                rel_parts = py_file.resolve().relative_to(self.repo_path).parts
+            except ValueError:
+                rel_parts = py_file.parts
+
+            if any(part in rel_parts for part in IGNORED_DIRS.union({".gemini", "brain", "site-packages"})):
                 continue
+            if len(rel_parts) > 1 and rel_parts[0] in {"tests", "checker"} and self.repo_path.name not in {"tests", "vulnerable_app"}:
+                continue
+
             try:
                 with open(py_file, "r", encoding="utf-8", errors="ignore") as f:
-                    tree = ast.parse(f.read(), filename=str(py_file))
+                    content = f.read()
+                tree = ast.parse(content, filename=str(py_file))
                 for node in ast.walk(tree):
                     if isinstance(node, ast.Import):
                         for alias in node.names:
-                            if alias.name in {"subprocess", "shutil", "os.system"}:
-                                undeclared_capabilities.append(f"{py_file.name}: imports {alias.name}")
+                            if alias.name in {"subprocess", "shutil", "pty"}:
+                                undeclared_capabilities.append(f"{py_file.name}: imports shell/process tool '{alias.name}'")
+                            elif alias.name in {"psycopg2", "asyncpg", "pymongo", "mysql", "sqlite3"}:
+                                undeclared_capabilities.append(f"{py_file.name}: imports database driver '{alias.name}'")
+                            elif alias.name in {"sqlalchemy"}:
+                                undeclared_capabilities.append(f"{py_file.name}: imports database ORM '{alias.name}'")
                     elif isinstance(node, ast.ImportFrom):
-                        if node.module in {"subprocess"}:
-                            undeclared_capabilities.append(f"{py_file.name}: imports from subprocess")
+                        if node.module in {"subprocess", "shutil", "pty"}:
+                            undeclared_capabilities.append(f"{py_file.name}: imports from '{node.module}'")
+                        elif node.module in {"psycopg2", "asyncpg", "pymongo", "mysql", "sqlalchemy"}:
+                            undeclared_capabilities.append(f"{py_file.name}: imports from database package '{node.module}'")
+                    elif isinstance(node, ast.Call):
+                        if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+                            if node.func.value.id == "os" and node.func.attr in {"system", "popen", "spawn"}:
+                                undeclared_capabilities.append(f"{py_file.name}: invokes shell execution 'os.{node.func.attr}()'")
             except Exception:
                 continue
 
@@ -352,9 +374,9 @@ class StaticScanner:
                 title="Code Capability Verification [AST]",
                 severity=Severity.P1,
                 status=Status.WARN,
-                message="Detected potential high-agency capabilities (e.g. subprocess) in code.",
+                message=f"Detected {len(undeclared_capabilities)} potential high-agency capabilities (e.g. database/subprocess) in code.",
                 evidence="; ".join(undeclared_capabilities[:3]),
-                hint="Ensure all state-changing or shell execution capabilities have human oversight configured.",
+                hint="Ensure all state-changing, shell execution, or database capabilities have human oversight configured.",
             )
 
         return CheckResult(

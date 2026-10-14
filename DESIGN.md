@@ -95,10 +95,14 @@ regulatory_compliance:
 
 ### What I would change at scale
 
-1. **In-Process ASGI/WSGI Test Execution:** Rather than requiring live deployed HTTP servers, update the checker to import the application directly in CI and probe it in-process using an ASGI/WSGI test client (as demonstrated in our pytest suite). This cuts execution time from 2 minutes down to $< 1$ second and eliminates cloud networking dependencies.
+1. **Developer-Local Inner Loop vs. Ephemeral Multi-Tenant Container Runners:**
+   * *Local Inner Loop:* Individual developers use in-process ASGI/WSGI test clients (as demonstrated in our pytest suite) for sub-second local iterations without spinning up servers.
+   * *Multi-Tenant Platform Scale:* Across 50 heterogeneous enterprise teams, applications rely on conflicting dependency trees (Pydantic v1 vs. v2, PyTorch, different Python versions) or polyglot runtimes (FastAPI, Flask, Next.js/Node, Go). A central compliance gate cannot `import app` directly without severe dependency hell and arbitrary code execution vulnerabilities in CI runners. Instead, the platform standardizes on **ephemeral container runners (OCI/Docker containers in CI)** booting in $<3$s, which the compliance CLI audits over localhost HTTP. This enforces true black-box language independence and security isolation.
 2. **Warn-Then-Enforce Rollout Cycles:** New compliance rules must be introduced as `P1 WARN` for two sprint cycles (30 days). The checker surfaces warnings in CI logs without failing builds, giving teams advance notice before the rule flips to a blocking `P0 FAIL`.
-3. **Audited Waiver Governance:** `.complianceignore` entries must require mandatory expiration timestamps (max 60 days) and `CODEOWNERS` platform approval. Expired waivers fail the build automatically.
-4. **Static AST Capability Checks:** Supplement self-attested YAML by statically inspecting code for undeclared high-agency imports (`subprocess`, `sqlalchemy`, `psycopg2`). If a service declares `minimal_risk` with no database access but imports raw database drivers or shell execution tools, CI flags the discrepancy for review.
+3. **The 90/10 Waiver Governance Model:**
+   * Automation eliminates 90% of mechanical toil (hardcoded keys, missing auth middleware, missing `/healthz`, unpropagated trace IDs), freeing platform gatekeepers from routine manual audits.
+   * Waivers via `.complianceignore` are strictly time-bounded (max 30 days) and require an active issue tracker reference. Permanent waivers or production high-risk overrides require `CODEOWNERS` platform sign-off. Expired waivers fail the build automatically.
+4. **Static AST Capability Checks:** Supplement self-attested YAML by statically inspecting code for undeclared high-agency imports (`subprocess`, `shutil`, `sqlalchemy`, `psycopg2`, `asyncpg`, `os.system`). If a service declares `minimal_risk` with no database access but imports raw database drivers or shell execution tools, CI flags the discrepancy for human review.
 
 ---
 
@@ -109,11 +113,17 @@ regulatory_compliance:
 * **Fully Automated:** Decisions that are binary, deterministic, fast to execute, and easily reversible by pushing a code fix.
 * **Human Review:** Decisions that involve high blast radius, irreversible state changes, sensitive external compliance liability, or subjective domain nuance.
 
+### SRE vs. Domain SME Operational Boundary
+
+In centrally managed apps (`tier_1_platform_managed`), operational accountability is strictly segmented:
+* **Platform SRE Owns Infrastructure Golden Signals:** Container uptime, HTTP 5xx error budgets, latency SLOs ($p95 < 500\text{ms}$), API credential rotation, and token cost quotas. SRE executes rollbacks when error budgets are exhausted.
+* **Domain Teams Own Semantic Quality & Prompt Drift:** Model hallucinations, response accuracy, and prompt tuning are **never an SRE paging incident**. User feedback and accuracy regressions route asynchronously to the designated business unit SME during normal business hours.
+
 | Finding / Scope | Fully Automated Gate | Escalates to Human Review | Rationale |
 | :--- | :--- | :--- | :--- |
-| **API Keys & Secrets** | Hardcoded key patterns block immediately. | Formal waiver request for intentional fixtures. | Secret leaks are objective and non-negotiable. |
+| **API Keys & Secrets** | Hardcoded key patterns block immediately. | Formal waiver request with ticket ID and expiry. | Secret leaks are objective and non-negotiable. |
 | **Route Authentication** | Endpoints returning 200 without auth block build. | Exposing an intentionally public route (`auth: none`). | Exposing unauthenticated routes dramatically widens the organization's attack perimeter. |
-| **Prompt Injection** | Computed-token obedience and canary disclosure. | Complex autonomous agents executing external tool calls. | Autonomous tools can trigger irreversible side effects on internal systems. |
+| **Prompt Injection** | Dynamic computed-token obedience and canary disclosure. | Complex autonomous agents executing external tool calls. | Autonomous tools can trigger irreversible side effects on internal systems. |
 | **Regulatory Tiering** | Manifest syntax, schema, and legal enum checks. | Declaring or changing an app to `high_risk` (EU AI Act). | Regulatory classification carries legal liability and cannot be purely self-attested. |
 | **Data & DB Access** | Manifest declarations of read-only access. | Requests for production database write permissions or raw PII access. | Database mutations and customer data exposure are irreversible. |
 

@@ -34,8 +34,8 @@ def parse_args():
     )
     parser.add_argument(
         "--repo-path",
-        default=".",
-        help="Path to the repository root for static analysis (default: .)"
+        default=None,
+        help="Path to repository root for static analysis (auto-inferred if running against local reference app)"
     )
     parser.add_argument(
         "--manifest",
@@ -148,36 +148,84 @@ def run_compliance_suite(
 
     try:
         # 1. Static Security, Manifest & AST Capability Scan
-        static_scanner = StaticScanner(target.repo_path, manifest_path)
-        results.extend(static_scanner.run_all())
+        if target.repo_path:
+            static_scanner = StaticScanner(target.repo_path, manifest_path)
+            results.extend(static_scanner.run_all())
 
-        # Extract declared canary from manifest if present
-        manifest_file = static_scanner.find_manifest()
-        if manifest_file and not target.canary:
-            try:
-                from ruamel.yaml import YAML
-                y = YAML(typ="safe")
-                with open(manifest_file, "r", encoding="utf-8") as mf:
-                    mdata = y.load(mf)
-                if isinstance(mdata, dict):
-                    target.canary = mdata.get("safety", {}).get("canary")
-            except Exception:
-                pass
+            # Extract declared canary from manifest if present
+            manifest_file = static_scanner.find_manifest()
+            if manifest_file and not target.canary:
+                try:
+                    from ruamel.yaml import YAML
+                    y = YAML(typ="safe")
+                    with open(manifest_file, "r", encoding="utf-8") as mf:
+                        mdata = y.load(mf)
+                    if isinstance(mdata, dict):
+                        target.canary = mdata.get("safety", {}).get("canary")
+                except Exception:
+                    pass
+        else:
+            results.extend([
+                CheckResult(
+                    id="secrets",
+                    title="Static Secrets [CWE-798 / OWASP LLM02]",
+                    severity=Severity.P0,
+                    status=Status.SKIPPED,
+                    message="Static secrets scan skipped: Running in black-box HTTP mode (no --repo-path provided).",
+                    hint="Pass --repo-path /path/to/repo to enable static security audit.",
+                ),
+                CheckResult(
+                    id="manifest",
+                    title="Service Manifest [EU AI Act & Governance]",
+                    severity=Severity.P0,
+                    status=Status.SKIPPED,
+                    message="Service manifest check skipped: Running in black-box HTTP mode (no --repo-path provided).",
+                    hint="Pass --repo-path /path/to/repo with service.yaml to enable governance validation.",
+                ),
+                CheckResult(
+                    id="capabilities",
+                    title="Code Capability Verification [AST]",
+                    severity=Severity.P1,
+                    status=Status.SKIPPED,
+                    message="Code capability scan skipped: Running in black-box HTTP mode (no --repo-path provided).",
+                    hint="Pass --repo-path /path/to/repo to enable AST code inspection.",
+                ),
+            ])
 
         # 2. Dynamic HTTP Probing (Health, Tracing, Auth Gate)
         dynamic_prober = DynamicProber(target, client=client)
-        results.extend(dynamic_prober.run_all())
+        dynamic_results = dynamic_prober.run_all()
+        results.extend(dynamic_results)
 
-        # 3. AI Safety & Red-Teaming Probing
-        safety_evaluator = SafetyEvaluator(
-            target,
-            client=client,
-            enable_judge=enable_judge,
-            judge_api_key=judge_api_key,
-            judge_provider=judge_provider,
-            judge_model=judge_model,
+        # Check if server is offline: fast-fail remaining dynamic evaluations
+        server_offline = any(
+            r.id == "health" and r.metadata and r.metadata.get("is_offline")
+            for r in dynamic_results
         )
-        results.extend(safety_evaluator.run_all())
+
+        if server_offline:
+            results.append(
+                CheckResult(
+                    id="safety",
+                    title="AI Safety [OWASP LLM01/07]",
+                    severity=Severity.P0,
+                    status=Status.SKIPPED,
+                    message=f"Safety probing skipped: Target server {target.url} is offline.",
+                    hint="Start the application server before running AI safety probes.",
+                    metadata={"is_offline": True},
+                )
+            )
+        else:
+            # 3. AI Safety & Red-Teaming Probing
+            safety_evaluator = SafetyEvaluator(
+                target,
+                client=client,
+                enable_judge=enable_judge,
+                judge_api_key=judge_api_key,
+                judge_provider=judge_provider,
+                judge_model=judge_model,
+            )
+            results.extend(safety_evaluator.run_all())
 
     finally:
         if close_client:
@@ -188,22 +236,32 @@ def run_compliance_suite(
 
 def main():
     args = parse_args()
-    repo_path = Path(args.repo_path).resolve()
+
+    # Determine repo_path
+    if args.repo_path is not None:
+        repo_path = Path(args.repo_path).resolve()
+    else:
+        cwd = Path(".").resolve()
+        if args.url in {"http://localhost:8000", "http://127.0.0.1:8000"} and (cwd / "app" / "main.py").is_file():
+            repo_path = cwd
+        else:
+            repo_path = None  # Black-Box HTTP Mode
 
     # Handle --init-manifest flag
     if args.init_manifest:
-        target_manifest = repo_path / "service.yaml"
+        target_dir = repo_path or Path(".").resolve()
+        target_manifest = target_dir / "service.yaml"
         if target_manifest.exists():
             print(f"Error: {target_manifest} already exists.", file=sys.stderr)
             sys.exit(1)
-        template = generate_manifest_template(service_name=repo_path.name)
+        template = generate_manifest_template(service_name=target_dir.name)
         with open(target_manifest, "w", encoding="utf-8") as f:
             f.write(template)
         print(f"Created pre-filled service.yaml at {target_manifest}")
         sys.exit(0)
 
     # 1. Automated Discovery
-    discovery = ServiceDiscovery(args.url, str(repo_path))
+    discovery = ServiceDiscovery(args.url, str(repo_path) if repo_path else None)
     try:
         target = discovery.discover_target(
             endpoint_override=args.endpoint,

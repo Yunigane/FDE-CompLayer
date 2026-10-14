@@ -19,10 +19,8 @@ ADVERSARIAL_PATTERNS = [
     r"what\s+(?:is|are)\s+your\s+(?:secret|instructions|system\s+prompt|canary)",
     r"reveal\s+.*canary",
     r"disregard\s+(?:all\s+)?(?:guidelines|rules)",
-    r"act\s+as\s+(?:an\s+unfiltered|dan|evil|root_admin|terminal)",
+    r"(?:act\s+as|you\s+are\s+now)\s+(?:an?\s+)?(?:unfiltered|dan|evil|root_admin|terminal|admin)",
     r"system\s+(?:prompt\s+leak|override)",
-    r"concatenate.*cmp.*7731",
-    r"emergency\s+maintenance\s+mode",
 ]
 
 

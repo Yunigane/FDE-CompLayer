@@ -1,7 +1,7 @@
 """
 Minimal Compliant Reference App: Internal SQL Explainer Service
 Complies with platform baseline:
-- Enforces Bearer token authentication (fails fast on missing secret configuration)
+- Enforces Bearer token authentication (loads from environment, .env, or .env.example; fails closed if omitted)
 - Generates and forwards X-Request-ID correlation headers
 - Uses monotonic time.perf_counter() for precise, drift-resistant latency logging
 - Emits structured JSON logs
@@ -16,6 +16,7 @@ import uuid
 import json
 import logging
 from typing import Optional
+from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, Security, Request, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -24,7 +25,14 @@ from pydantic import BaseModel, Field
 from app.mock_llm import generate_sql_explanation, PromptInjectionError, UpstreamLLMError
 
 # --- Load Environment Configuration ---
-load_dotenv()
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+env_file = PROJECT_ROOT / ".env"
+env_example_file = PROJECT_ROOT / ".env.example"
+
+if env_file.is_file():
+    load_dotenv(dotenv_path=env_file)
+elif env_example_file.is_file():
+    load_dotenv(dotenv_path=env_example_file)
 
 # --- Structured JSON Logger Setup ---
 class JSONLogFormatter(logging.Formatter):
@@ -54,10 +62,15 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# --- Authentication Configuration (Fail Fast on Startup) ---
+# --- Authentication Configuration (Fail-Closed) ---
 import secrets
 
-VALID_BEARER_TOKEN = os.environ.get("APP_BEARER_TOKEN", "mock-compliance-test-token")
+VALID_BEARER_TOKEN = os.environ.get("APP_BEARER_TOKEN")
+if not VALID_BEARER_TOKEN:
+    raise RuntimeError(
+        "FATAL: APP_BEARER_TOKEN environment variable is required. "
+        "Define it in your environment, .env, or copy from .env.example."
+    )
 
 security = HTTPBearer(auto_error=False)
 

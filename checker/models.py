@@ -44,7 +44,7 @@ class CheckResult:
 @dataclass
 class Target:
     url: str
-    repo_path: str = "."
+    repo_path: Optional[str] = None
     endpoint: Optional[str] = None
     all_endpoints: List[Dict[str, Any]] = field(default_factory=list)
     auth_type: str = "bearer"  # "bearer", "basic", "api_key", "none"
@@ -54,6 +54,8 @@ class Target:
     api_key_header: str = "X-API-Key"
     payload_field: Optional[str] = None
     payload_template: Optional[str] = None
+    payload_type: str = "flat"  # "flat" or "chat"
+    health_path: Optional[str] = None
     service_name: Optional[str] = None
     canary: Optional[str] = None
 
@@ -78,8 +80,11 @@ class Target:
 
     def build_payload(self, prompt: str) -> Dict[str, Any]:
         """
-        Construct request body. If payload_template is defined (JSON with {{PROMPT}}),
-        substitute prompt. Otherwise use payload_field or default to 'query'.
+        Construct request body.
+        1. If payload_template is defined (JSON with {{PROMPT}}), substitute prompt.
+        2. If payload_type == "chat", construct standard messages array payload:
+           {"messages": [{"role": "user", "content": prompt}], "stream": False}
+        3. Otherwise use payload_field (defaulting to 'query').
         """
         if self.payload_template:
             try:
@@ -87,5 +92,10 @@ class Target:
                 return json.loads(raw)
             except Exception:
                 pass
+        if (self.payload_type or "flat").lower() == "chat":
+            return {
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": False,
+            }
         field_name = self.payload_field or "query"
         return {field_name: prompt}

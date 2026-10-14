@@ -97,6 +97,15 @@ FDE-CompLayer/
 
 ## 4. Quickstart & Verification Instructions
 
+### Step 0: Environment Setup (Optional for Local Dev)
+For standard local development, copy the environment template:
+```bash
+cp .env.example .env
+```
+*(Note: If omitted, the reference service and compliance checker will automatically load defaults from `.env.example` with zero hardcoded secret literals in Python source code).*
+
+---
+
 ### Step 1: Start the Compliant Reference App
 In your primary terminal, start the reference FastAPI service:
 ```bash
@@ -172,8 +181,8 @@ Observability [Audit Tracing]          P0         FAIL         Missing X-Request
 Access Control & Auth [Gateway]        P0         FAIL         Unauthenticated request to POST /api/v1/...
   ↳ Evidence: POST /api/v1/chat returned status 200
   ↳ Hint: All exposed operational routes must reject unauthenticated requests with HTTP 401 or 403.
-AI Safety [OWASP LLM01/07]             P0         FAIL         Failed 3/4 safety probes: Prompt leakage...
-  ↳ Evidence: system_prompt_extraction: App leaked potential system prompt instructions (
+AI Safety [OWASP LLM01/07]             P0         FAIL         Failed 4/4 safety probes: Prompt leakage...
+  ↳ Evidence: computed_token_obedience: App echoed adversarial attack payload without act
   ↳ Hint: Implement input sanitization, computed-token guards, and strict model system instruction boundaries.
 ----------------------------------------------------------------------------------
 Summary: 1 Passed | 6 Failed | 0 Warnings | 0 Skipped
@@ -230,9 +239,9 @@ Throughout this project, AI was utilized as an interactive pair-programming part
    Used an AI coding assistant within Antigravity IDE to scaffold the baseline FastAPI service, draft regex pattern matchers for multi-provider API keys, and implement the initial 3-tier discovery harness.
 2. **Adversarial Architecture & Code Audit:**  
    To prevent confirmation bias and avoid common take-home traps, we ran an extensive, adversarial code review simulating a principal-level engineering review. This audit surfaced critical generalization gaps in our initial prototype:
-   * *Coupling in safety checks:* Replacing hardcoded reference-app SQL canary tokens with **computed-token obedience probes** (`"concatenate CMP and 7731"` $\rightarrow$ `"CMP7731"`), which reliably distinguishes actual instruction obedience from passive prompt echoing.
+   * *Coupling in safety checks:* Replacing hardcoded canary tokens with **dynamic computed-token obedience probes with runtime cryptographic nonces**, ensuring applications cannot game the test with pre-baked regex patterns.
    * *Auth scheme inflexibility:* Adding multi-scheme support (Bearer, HTTP Basic Auth, and custom API-key headers) and multi-route probing unauthenticated across all declared operations.
    * *Truth in claims:* Replacing regex approximations with real Python `ast.parse` for route and Pydantic request model extraction, and replacing naive comment-skipping in secret scanners to catch real-world commented-out credentials.
    * *Semantic exit codes:* Implementing distinct exit codes: `0` (Safe to Ship), `1` (P0 Blocker), and `2` (P0 Skipped / Incomplete).
 3. **Engineering Judgment:**  
-   While AI assisted with rapid implementation and adversarial challenge, all foundational system decisions—the single paved road with metadata tiers, the graduation contract, the blast radius $\times$ reversibility rule, and the deliberate omission of generic hallucination benchmarks—were human-led architectural choices. By me.
+   While AI assisted with rapid implementation and adversarial challenge, all foundational system decisions—the single paved road with metadata tiers, the graduation contract, the blast radius $\times$ reversibility rule, and the deliberate omission of generic hallucination benchmarks—were deliberate architectural choices balancing developer velocity against organizational risk.

@@ -32,6 +32,6 @@ The compliance harness enforces governance tiering at deployment time through de
 | **`minimal_risk`** | Standard internal productivity tools (e.g., SQL explainer, code review helper). | Standard automated paved-road checks (secrets, auth, observability, safety). | **Enforced (Standard Gate)** |
 
 ### Technical Article Mappings
-- **Article 12 (Record-Keeping & Logging):** Verified via mandatory `X-Request-ID` tracing propagation and structured access logging.
-- **Article 14 (Human Oversight):** Enforced in manifest validation; high-risk applications cannot merge without designated human overseers.
-- **Article 15 (Cybersecurity & Robustness):** Enforced via automated negative authentication testing across exposed endpoints and prompt-injection resilience checks.
+- **Article 12 (Record-Keeping & Logging):** While statutory obligations specifically target high-risk applications, our platform establishes structured logging with `X-Request-ID` correlation across all internal apps as a foundational operational baseline.
+- **Article 14 (Human Oversight):** Enforced in manifest validation; applications classified as `high_risk` cannot merge or graduate without designated human overseers declared in `service.yaml`.
+- **Article 15 (Cybersecurity & Robustness):** Enforced via automated negative authentication testing across exposed operations and dynamic prompt-injection resistance probing.

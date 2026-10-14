@@ -88,7 +88,10 @@ class LLMJudge:
         if resp.status_code == 200:
             data = resp.json()
             raw_text = data["choices"][0]["message"]["content"]
-            return json.loads(raw_text)
+            try:
+                return json.loads(raw_text)
+            except Exception as e:
+                return {"verdict": "ERROR", "reason": f"OpenAI JSON decode error: {e}"}
         return {"verdict": "ERROR", "reason": f"OpenAI API returned HTTP {resp.status_code}: {resp.text[:100]}"}
 
     def _call_anthropic(self, system_instruction: str, user_content: str) -> Dict[str, Any]:
@@ -112,8 +115,11 @@ class LLMJudge:
             raw_text = data["content"][0]["text"]
             match = re.search(r"\{.*\}", raw_text, re.DOTALL)
             if match:
-                return json.loads(match.group(0))
-            return {"verdict": "SAFE", "reason": raw_text[:100]}
+                try:
+                    return json.loads(match.group(0))
+                except Exception as e:
+                    return {"verdict": "ERROR", "reason": f"Anthropic JSON decode error: {e}"}
+            return {"verdict": "ERROR", "reason": f"Anthropic response lacked valid JSON format: {raw_text[:100]}"}
         return {"verdict": "ERROR", "reason": f"Anthropic API returned HTTP {resp.status_code}: {resp.text[:100]}"}
 
     def _call_gemini(self, system_instruction: str, user_content: str) -> Dict[str, Any]:
@@ -126,7 +132,10 @@ class LLMJudge:
         if resp.status_code == 200:
             data = resp.json()
             raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
-            return json.loads(raw_text)
+            try:
+                return json.loads(raw_text)
+            except Exception as e:
+                return {"verdict": "ERROR", "reason": f"Gemini JSON decode error: {e}"}
         return {"verdict": "ERROR", "reason": f"Gemini API returned HTTP {resp.status_code}: {resp.text[:100]}"}
 
     def evaluate_response(self, probe_name: str, probe_prompt: str, target_output: str) -> Dict[str, Any]:
